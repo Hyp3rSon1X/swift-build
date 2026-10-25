@@ -2571,10 +2571,17 @@ public final class SwiftCompilerSpec : CompilerSpec, SpecIdentifierType, SwiftDi
     public static func shouldUseWholeModuleOptimization(for scope: MacroEvaluationScope) -> (result: Bool, isExplicitlyEnabled: Bool) {
         let isForAPI = scope.evaluate(BuiltinMacros.INSTALLAPI_MODE_ENABLED)
         let isForEmbeddedSwift = scope.evaluate(BuiltinMacros.SWIFT_ENABLE_EMBEDDED) || scope.evaluate(BuiltinMacros.OTHER_SWIFT_FLAGS).contains(["-enable-experimental-feature", "Embedded"])
-        let isExplicitlyEnabled =
-            scope.evaluate(BuiltinMacros.SWIFT_WHOLE_MODULE_OPTIMIZATION) ||
-            (scope.evaluate(BuiltinMacros.SWIFT_COMPILATION_MODE) == "wholemodule") ||
-            (scope.evaluate(BuiltinMacros.SWIFT_OPTIMIZATION_LEVEL) == "-Owholemodule")
+        let isExplicitlyEnabled: Bool
+        // OTHER_SWIFT_FLAGS come after the flags derived from the WMO build settings on the command line, and the driver honors
+        // the last of these flags, so an explicit WMO flag there decides the compilation mode.
+        if let wmoFlag = scope.evaluate(BuiltinMacros.OTHER_SWIFT_FLAGS).last(where: { ["-wmo", "-whole-module-optimization", "-no-whole-module-optimization"].contains($0) }) {
+            isExplicitlyEnabled = wmoFlag != "-no-whole-module-optimization"
+        } else {
+            isExplicitlyEnabled =
+                scope.evaluate(BuiltinMacros.SWIFT_WHOLE_MODULE_OPTIMIZATION) ||
+                (scope.evaluate(BuiltinMacros.SWIFT_COMPILATION_MODE) == "wholemodule") ||
+                (scope.evaluate(BuiltinMacros.SWIFT_OPTIMIZATION_LEVEL) == "-Owholemodule")
+        }
         let isEnabled = isExplicitlyEnabled || isForAPI || isForEmbeddedSwift
         return (isEnabled, isExplicitlyEnabled)
     }

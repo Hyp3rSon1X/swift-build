@@ -5856,6 +5856,86 @@ fileprivate struct SwiftTaskConstructionTests: CoreBasedTests {
             }
         }
     }
+
+    /// Verify that the last of `-wmo`, `-whole-module-optimization` and `-no-whole-module-optimization` in
+    /// `OTHER_SWIFT_FLAGS` decides whether whole module optimization is used, overriding the build settings, since
+    /// the driver honors the last of these flags on the command line. Otherwise the build plans outputs (such as the
+    /// `-primary.d` dependency file) for a compilation mode the driver does not use.
+    @Test(.requireSDKs(.host))
+    func otherSwiftFlagsOverrideWMO() async throws {
+        let swiftCompilerPath = try await self.swiftCompilerPath
+        let swiftVersion = try await self.swiftVersion
+        let libtoolPath = try await self.libtoolPath
+
+        func makeTestProject(buildSettings: [String: String]) -> TestProject {
+            var settings = buildSettings
+            settings["PRODUCT_NAME"] = "$(TARGET_NAME)"
+            settings["SWIFT_EXEC"] = swiftCompilerPath.str
+            settings["SWIFT_VERSION"] = swiftVersion
+            settings["LIBTOOL"] = libtoolPath.str
+            return TestProject(
+                "aProject",
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("File1.swift"),
+                        TestFile("File2.swift"),
+                    ]
+                ),
+                buildConfigurations: [
+                    TestBuildConfiguration("Release", buildSettings: settings),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "Lib",
+                        type: .staticLibrary,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["File1.swift", "File2.swift"]),
+                        ]
+                    )
+                ]
+            )
+        }
+
+        func dependencyFileName(_ task: any PlannedTask) -> String? {
+            guard case .makefileIgnoringSubsequentOutputs(let path)? = task.dependencyData else {
+                return nil
+            }
+            return path.basename
+        }
+
+        let core = try await getCore()
+
+        let cases: [(buildSettings: [String: String], expectWMO: Bool)] = [
+            (["SWIFT_OPTIMIZATION_LEVEL": "-Owholemodule", "OTHER_SWIFT_FLAGS": "-no-whole-module-optimization"], false),
+            (["SWIFT_COMPILATION_MODE": "wholemodule", "OTHER_SWIFT_FLAGS": "-no-whole-module-optimization"], false),
+            (["SWIFT_WHOLE_MODULE_OPTIMIZATION": "YES", "OTHER_SWIFT_FLAGS": "-wmo -no-whole-module-optimization"], false),
+            (["SWIFT_OPTIMIZATION_LEVEL": "-Owholemodule", "OTHER_SWIFT_FLAGS": "-no-whole-module-optimization -whole-module-optimization"], true),
+            (["SWIFT_OPTIMIZATION_LEVEL": "-O", "OTHER_SWIFT_FLAGS": "-wmo"], true),
+            (["SWIFT_OPTIMIZATION_LEVEL": "-O", "OTHER_SWIFT_FLAGS": "-whole-module-optimization"], true),
+        ]
+        for (buildSettings, expectWMO) in cases {
+            let tester = try TaskConstructionTester(core, makeTestProject(buildSettings: buildSettings))
+            await tester.checkBuild(runDestination: .host) { results in
+                results.checkTarget("Lib") { target in
+                    results.checkTask(.matchTarget(target), .matchRuleType("SwiftDriver Compilation")) { task in
+                        if expectWMO {
+                            task.checkCommandLineContains(["-num-threads"])
+                            task.checkCommandLineDoesNotContain("-enable-batch-mode")
+                        } else {
+                            task.checkCommandLineDoesNotContain("-num-threads")
+                            task.checkCommandLineContains(["-enable-batch-mode"])
+                        }
+                    }
+                    results.checkTask(.matchTarget(target), .matchRuleType("SwiftDriver Compilation Requirements")) { task in
+                        // Only a WMO compile writes the module-level `-primary.d` dependency file.
+                        #expect((dependencyFileName(task) == "Lib-primary.d") == expectWMO, "\(buildSettings)")
+                    }
+                }
+                results.checkNoDiagnostics()
+            }
+        }
+    }
 }
 
 private func XCTAssertEqual(_ lhs: EnvironmentBindings, _ rhs: [String: String], file: StaticString = #filePath, line: UInt = #line) {

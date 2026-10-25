@@ -5444,6 +5444,67 @@ fileprivate struct SwiftDriverTests: CoreBasedTests {
         }
     }
 
+    /// A WMO flag in `OTHER_SWIFT_FLAGS` overrides the compilation mode chosen by the build settings, so the build
+    /// must expect the outputs (e.g. dependency files) of the mode the driver actually uses.
+    @Test(.requireSDKs(.host), arguments: [
+        ["SWIFT_OPTIMIZATION_LEVEL": "-Owholemodule", "OTHER_SWIFT_FLAGS": "-no-whole-module-optimization"],
+        ["SWIFT_OPTIMIZATION_LEVEL": "-O", "OTHER_SWIFT_FLAGS": "-wmo"],
+    ])
+    func otherSwiftFlagsOverrideWMO(extraSettings: [String: String]) async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            let testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            path: "Sources",
+                            children: [
+                                TestFile("file1.swift"),
+                                TestFile("file2.swift"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Release",
+                                buildSettings: [
+                                    "CODE_SIGNING_ALLOWED": "NO",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                ].merging(extraSettings, uniquingKeysWith: { $1 }))
+                        ],
+                        targets: [
+                            TestStandardTarget(
+                                "TargetA",
+                                type: .staticLibrary,
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "file1.swift",
+                                        "file2.swift",
+                                    ]),
+                                ]),
+                        ])
+                ])
+
+            let tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+            let parameters = BuildParameters(configuration: "Release")
+            let buildRequest = BuildRequest(parameters: parameters, buildTargets: tester.workspace.projects[0].targets.map({ BuildRequest.BuildTargetInfo(parameters: parameters, target: $0) }), continueBuildingAfterErrors: false, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false)
+            let SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+            try await tester.fs.writeFileContents(SRCROOT.join("Sources/file1.swift")) { file in
+                file <<< "public struct A {}\n"
+            }
+            try await tester.fs.writeFileContents(SRCROOT.join("Sources/file2.swift")) { file in
+                file <<< "public struct B {}\n"
+            }
+
+            try await tester.checkBuild(runDestination: .host, buildRequest: buildRequest, persistent: true) { results in
+                results.checkNoErrors()
+            }
+        }
+    }
+
     // Swift versions < 5 are notable because they disable explicit modules.
     // This in turn impacts how we do things like registration of modules for
     // debugging. This serves as a basic regression test to ensure we don't break
